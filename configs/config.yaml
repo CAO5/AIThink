@@ -1,0 +1,25 @@
+# AIThink 配置文件
+
+server:
+  port: 8080
+  mode: debug  # debug, release
+
+browser:
+  headless: false  # 是否无头模式运行
+  timeout: 60     # 默认超时时间（秒）
+
+supported_platforms:
+  - name: zhipu
+    display_name: 智谱清言
+    url: https://chatglm.cn/
+    enabled: true
+  
+  - name: chatgpt
+    display_name: ChatGPT
+    url: https://chat.openai.com/
+    enabled: false
+  
+  - name: claude
+    display_name: Claude
+    url: https://claude.ai/
+    enabled: false

@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go mod:*)",
+      "Bash(go build:*)",
+      "Bash(curl -s -X POST http://localhost:8081/api/v1/login -H \"Content-Type: application/json\" -d '{\"\"\"\"platform\"\"\"\":\"\"\"\"zhipu\"\"\"\",\"\"\"\"username\"\"\"\":\"\"\"\"18063422115\"\"\"\"}')",
+      "Bash(python -m json.tool)",
+      "Bash(curl:*)",
+      "Bash(netstat -ano)",
+      "Bash(taskkill //F //PID 7036)",
+      "Bash(taskkill //F //IM aithink.exe)",
+      "Bash(tasklist)",
+      "Read(//tmp/**)",
+      "Bash(where chrome:*)",
+      "Bash(where chrome.exe)",
+      "Bash(registry query:*)",
+      "Bash(taskkill //F //PID 23012)",
+      "Bash(./bin/aithink.exe)",
+      "Bash(taskkill //F //IM chrome.exe)",
+      "Bash(find D:/wan_workspase/AIThink/test_user_data -name *ookie* -o -name *ookies*)"
+    ]
+  }
+}
