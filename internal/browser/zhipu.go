@@ -1,7 +1,7 @@
 package browser
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
@@ -30,6 +30,40 @@ func NewZhipuClient(session *BrowserSession) *ZhipuClient {
 	return &ZhipuClient{session: session}
 }
 
+// NavigateToHome 导航到智谱首页（用于加载cookies后使cookies生效）
+func (z *ZhipuClient) NavigateToHome() error {
+	ctx := z.session.Ctx
+
+	log.Printf("正在导航到智谱首页: %s", zhipuChatURL)
+
+	// 导航到主页
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(zhipuChatURL),
+	); err != nil {
+		log.Printf("导航失败: %v", err)
+		return fmt.Errorf("导航失败: %v", err)
+	}
+
+	// 等待页面加载
+	chromedp.Run(ctx, chromedp.Sleep(3*time.Second))
+
+	// 注入反检测脚本
+	log.Println("注入反检测脚本...")
+	if err := z.session.InjectAntiDetection(); err != nil {
+		log.Printf("注入反检测脚本失败: %v", err)
+	}
+
+	// 再次等待确保页面稳定
+	chromedp.Run(ctx, chromedp.Sleep(1*time.Second))
+
+	// 检查导航后的URL
+	var currentURL string
+	chromedp.Run(ctx, chromedp.Location(&currentURL))
+	log.Printf("导航完成，当前URL: %s", currentURL)
+
+	return nil
+}
+
 // GetCookies 获取当前页面的cookies（通过JavaScript）
 func (z *ZhipuClient) GetCookies() (string, error) {
 	var cookieStr string
@@ -49,16 +83,20 @@ func (z *ZhipuClient) OpenLoginPage() error {
 	ctx := z.session.Ctx
 
 	log.Println("正在打开智谱清言网站...")
-	// 增加超时，避免卡住
-	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
+	log.Printf("Session Context: %v", ctx)
 
-	if err := chromedp.Run(timeoutCtx,
+	// 直接使用 session 的 ctx，不使用额外的超时包装
+	log.Printf("开始导航到: %s", zhipuLoginURL)
+	if err := chromedp.Run(ctx,
 		chromedp.Navigate(zhipuLoginURL),
-		chromedp.Sleep(3*time.Second),
 	); err != nil {
+		log.Printf("导航失败: %v", err)
 		return fmt.Errorf("导航失败: %v", err)
 	}
+	log.Printf("导航命令已发送，等待5秒...")
+	// 等待足够时间让页面完全加载（包括SPA路由）
+	chromedp.Run(ctx, chromedp.Sleep(5*time.Second))
+	log.Printf("等待完成")
 
 	// 注入反检测脚本
 	log.Println("注入反检测脚本...")
@@ -67,10 +105,19 @@ func (z *ZhipuClient) OpenLoginPage() error {
 		// 不返回错误，继续执行
 	}
 
+	// 再次等待确保反检测脚本生效
+	chromedp.Run(ctx, chromedp.Sleep(1*time.Second))
+
 	// 检查导航后的URL
 	var currentURL string
 	chromedp.Run(ctx, chromedp.Location(&currentURL))
 	log.Printf("导航完成，当前URL: %s", currentURL)
+
+	// 再次注入反检测（应对导航后的新页面）
+	z.session.InjectAntiDetection()
+
+	// 等待页面稳定
+	chromedp.Run(ctx, chromedp.Sleep(2*time.Second))
 
 	// 检查是否已经登录（cookie有效）
 	if z.CheckLoggedIn() {
@@ -96,20 +143,15 @@ func (z *ZhipuClient) CheckLoggedIn() bool {
 	ctx := z.session.Ctx
 	log.Println("CheckLoggedIn: 开始检查登录状态")
 
-	// 获取页面文本（增加超时）
+	// 获取页面文本 - 直接使用 session ctx，让 chromedp 内部处理超时
 	var pageText string
 	log.Println("CheckLoggedIn: 准备获取页面文本")
 	err := chromedp.Run(ctx,
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			// 设置超时
-			timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			defer cancel()
-			return chromedp.Text("body", &pageText).Do(timeoutCtx)
-		}),
+		chromedp.Text("body", &pageText, chromedp.ByQuery),
 	)
 	log.Printf("CheckLoggedIn: 获取页面文本完成, err=%v, text长度=%d", err, len(pageText))
-	if err != nil {
-		log.Printf("获取页面文本失败: %v", err)
+	if err != nil || len(pageText) == 0 {
+		log.Printf("获取页面文本失败或为空: %v", err)
 		return false
 	}
 
@@ -255,7 +297,7 @@ func (z *ZhipuClient) Ask(question string) (*AskResult, error) {
 		chromedp.Sleep(2*time.Second),
 	)
 
-	// 5. 等待AI回复完成（使用智能检测）
+	// 5. 等待AI回复完成（优化：区分思考过程和正式回复）
 	log.Println("等待AI回复...")
 	
 	// 人机检测关键词
@@ -269,58 +311,100 @@ func (z *ZhipuClient) Ask(question string) (*AskResult, error) {
 	detectInfo := ""
 	
 	// 等待回复完成，通过检测页面内容变化
-	maxWaitTime := 30 * time.Second
+	maxWaitTime := 60 * time.Second  // 增加到60秒，给AI更多时间
 	checkInterval := 2 * time.Second
 	startTime := time.Now()
 	
-	var lastContent string
+	var lastContentLength int
 	stableCount := 0
+	var resultStr string // 用于存储JS返回的JSON字符串
 	
 	for time.Since(startTime) < maxWaitTime {
 		chromedp.Run(ctx, chromedp.Sleep(checkInterval))
 		
-		// 获取当前页面内容
-		var currentContent string
+		// 获取当前页面内容长度
+		var currentContentLength int
+		var hasReplyElement bool
+		
 		chromedp.Run(ctx, chromedp.Evaluate(`
 			(function() {
-				// 尝试获取聊天内容区域
-				var chatArea = document.querySelector('.chat-container, .chat-main, [class*="chat"], .conversation, [class*="conversation"]');
-				if (chatArea) {
-					return chatArea.innerText;
+				// 检查是否有正式回复元素（排除思考过程）
+				var replySelectors = [
+					'.chat-message:last-child',
+					'.message-item:last-child',
+					'[class*="message-content"]:last-child'
+				];
+				
+				for (var i = 0; i < replySelectors.length; i++) {
+					var elem = document.querySelector(replySelectors[i]);
+					if (elem && elem.innerText && elem.innerText.length > 20) {
+						// 检查是否包含思考过程标记
+						var text = elem.innerText;
+						if (text.includes('思考过程') || text.includes('Formulate') || 
+						    text.includes('Analyze') || text.includes('思考中')) {
+							return JSON.stringify({length: text.length, hasReply: false});
+						}
+						return JSON.stringify({length: text.length, hasReply: true});
+					}
 				}
-				// 备用：获取body内容
-				return document.body.innerText;
+				
+				// 备用：获取整个聊天区域长度
+				var chatArea = document.querySelector('.chat-container, .chat-main, [class*="chat"]');
+				if (chatArea) {
+					return JSON.stringify({length: chatArea.innerText.length, hasReply: false});
+				}
+				return JSON.stringify({length: 0, hasReply: false});
 			})()
-		`, &currentContent))
+		`, &resultStr))
 		
-		// 如果内容没有变化，认为回复已完成
-		if currentContent == lastContent {
-			stableCount++
-			if stableCount >= 2 {
-				log.Printf("内容已稳定，回复可能已完成（稳定次数: %d）", stableCount)
-				break
-			}
-		} else {
-			stableCount = 0
-			lastContent = currentContent
-			log.Printf("内容变化中...（长度: %d）", len(currentContent))
+		// 解析JSON结果
+		var result struct {
+			Length   int  `json:"length"`
+			HasReply bool `json:"hasReply"`
 		}
+		if err := json.Unmarshal([]byte(resultStr), &result); err == nil {
+			currentContentLength = result.Length
+			hasReplyElement = result.HasReply
+		}
+		
+		// 检查是否检测到思考过程
+		if !hasReplyElement && currentContentLength > 100 {
+			log.Printf("检测到思考过程...（内容长度: %d）", currentContentLength)
+		}
+		
+		// 如果内容长度稳定（变化小于10%），认为回复已完成
+		if lastContentLength > 0 {
+			change := absInt(currentContentLength-lastContentLength)
+			if float64(change)/float64(lastContentLength) < 0.1 {
+				stableCount++
+				if stableCount >= 3 { // 需要3次稳定，避免过早结束
+					log.Printf("内容已稳定，回复可能已完成（稳定次数: %d，长度: %d）", stableCount, currentContentLength)
+					break
+				}
+			} else {
+				stableCount = 0
+				log.Printf("内容变化中...（长度: %d，变化: %d）", currentContentLength, change)
+			}
+		}
+		lastContentLength = currentContentLength
 	}
 
-	// 6. 获取AI回复（使用JavaScript智能提取）
+	// 6. 获取AI回复（优化：排除思考过程）
 	log.Println("获取AI回复...")
 	
 	var answer string
 	chromedp.Run(ctx, chromedp.Evaluate(`
 		(function() {
-			// 排除的关键词
+			// 排除的关键词（包含思考过程标记）
 			var excludeKeywords = ['主题模式', '学习模式', '云知识库', '实名认证', '我的订单', 
 			                         '帮助与反馈', '注销账号', '关于我们', '退出登录', 
 			                         '积分', '网信算备', 'ICP备', 'ChatGLM', 'Beijing',
 			                         'GLM-5', '最新旗舰', '扫描二维码', '体验智能体', '保存名片', '分享智能体',
 			                         '新对话', '登录', '注册', '手机号', '验证码', '人机验证', 'captcha',
 			                         'How can I help you', 'Feel free to type', 'I can help with',
-			                         '勾选即代表您阅读并同意', '用户协议', '隐私政策'];
+			                         '勾选即代表您阅读并同意', '用户协议', '隐私政策',
+			                         'Formulate the Strategy', 'Analyze the Input', 'Identify the Missing',
+			                         '跳过思考', '思考过程'];
 			
 			function shouldExclude(text) {
 				if (!text) return true;
@@ -333,7 +417,18 @@ func (z *ZhipuClient) Ask(question string) (*AskResult, error) {
 				return false;
 			}
 			
-			// 策略1：尝试找到AI回复的特定元素
+			function isThinkingContent(text) {
+				// 检查是否是思考过程
+				var thinkMarkers = ['Formulate', 'Analyze', 'Identify', 'Strategy', 'Input', 'Missing Information', '跳过思考'];
+				for (var i = 0; i < thinkMarkers.length; i++) {
+					if (text.includes(thinkMarkers[i])) {
+						return true;
+					}
+				}
+				return false;
+			}
+			
+			// 策略1：尝试找到AI回复的特定元素（优先找非思考内容）
 			var replySelectors = [
 				'.assistant-message',
 				'[class*="assistant"]',
@@ -345,26 +440,39 @@ func (z *ZhipuClient) Ask(question string) (*AskResult, error) {
 				'.message-item:last-child'
 			];
 			
+			// 先找正式回复
 			for (var i = 0; i < replySelectors.length; i++) {
 				var elem = document.querySelector(replySelectors[i]);
 				if (elem) {
 					var text = elem.innerText.trim();
-					if (text.length > 50 && !shouldExclude(text)) {
+					if (text.length > 50 && !isThinkingContent(text) && !shouldExclude(text)) {
 						return text;
 					}
 				}
 			}
 			
-			// 策略2：获取所有段落，找最长的有效文本
-			var paragraphs = document.querySelectorAll('p, div, span, article');
+			// 策略2：如果找到的是思考过程，尝试获取其他消息
+			for (var i = 0; i < replySelectors.length; i++) {
+				var elems = document.querySelectorAll(replySelectors[i]);
+				for (var j = 0; j < elems.length; j++) {
+					var text = elems[j].innerText.trim();
+					if (text.length > 50 && !isThinkingContent(text) && !shouldExclude(text)) {
+						return text;
+					}
+				}
+			}
+			
+			// 策略3：获取所有段落，找最长的有效文本（排除思考过程）
+			var paragraphs = document.querySelectorAll('p, div, article');
 			var bestText = '';
 			
 			for (var j = 0; j < paragraphs.length; j++) {
 				var p = paragraphs[j];
-				if (p.offsetParent === null) continue; // 不可见元素
+				if (p.offsetParent === null) continue;
 				
 				var text = p.innerText.trim();
-				if (text.length > bestText.length && text.length > 100 && text.length < 5000 && !shouldExclude(text)) {
+				if (text.length > bestText.length && text.length > 100 && text.length < 5000 && 
+				    !isThinkingContent(text) && !shouldExclude(text)) {
 					bestText = text;
 				}
 			}
@@ -373,13 +481,26 @@ func (z *ZhipuClient) Ask(question string) (*AskResult, error) {
 				return bestText;
 			}
 			
-			// 策略3：返回页面主要内容（排除头部和尾部）
+			// 策略4：返回页面主要内容（排除头部和尾部，排除思考过程）
 			var bodyText = document.body.innerText || '';
 			var lines = bodyText.split('\n');
 			var contentLines = [];
+			var skipMode = false;
 			
 			for (var k = 0; k < lines.length; k++) {
 				var line = lines[k].trim();
+				
+				// 跳过思考过程
+				if (isThinkingContent(line)) {
+					skipMode = true;
+					continue;
+				}
+				if (skipMode && (line.includes('4.') || line.includes('5.') || line.includes('Answer:'))) {
+					skipMode = false;
+					continue;
+				}
+				if (skipMode) continue;
+				
 				if (line.length > 50 && !shouldExclude(line)) {
 					contentLines.push(line);
 				}
@@ -394,6 +515,24 @@ func (z *ZhipuClient) Ask(question string) (*AskResult, error) {
 	`, &answer))
 	
 	log.Printf("获取到答案长度: %d", len(answer))
+	
+	// 如果答案仍然包含思考过程，进行二次清理
+	if strings.Contains(answer, "Formulate the Strategy") || strings.Contains(answer, "跳过思考") {
+		log.Println("检测到答案包含思考过程，进行清理...")
+		// 找到正式回复的开始位置
+		markers := []string{"Answer:", "回答：", "正式回复："}
+		for _, marker := range markers {
+			if idx := strings.Index(answer, marker); idx > 0 {
+				answer = answer[idx+len(marker):]
+				break
+			}
+		}
+		// 如果仍然很长，截取前500字符
+		if len(answer) > 500 {
+			answer = answer[:500] + "..."
+		}
+		log.Printf("清理后答案长度: %d", len(answer))
+	}
 	
 	// 检查是否被检测为机器人
 	for _, keyword := range botDetectKeywords {
@@ -415,3 +554,11 @@ func (z *ZhipuClient) Ask(question string) (*AskResult, error) {
 
 // min 返回两个整数中的较小值
 // Go 1.21+ 内置了 min 函数，直接使用
+
+// absInt 返回整数的绝对值
+func absInt(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}

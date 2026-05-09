@@ -17,7 +17,22 @@
       "Bash(taskkill //F //PID 23012)",
       "Bash(./bin/aithink.exe)",
       "Bash(taskkill //F //IM chrome.exe)",
-      "Bash(find D:/wan_workspase/AIThink/test_user_data -name *ookie* -o -name *ookies*)"
+      "Bash(find D:/wan_workspase/AIThink/test_user_data -name *ookie* -o -name *ookies*)",
+      "Bash(git push:*)",
+      "Bash(ssh:*)",
+      "Bash(gh repo:*)",
+      "Bash(git ls-remote:*)",
+      "Bash(git remote:*)",
+      "Bash(cd /d D:wan_workspaseAIThink)",
+      "Bash(go vet:*)",
+      "Bash(taskkill //F //IM chromedriver.exe)",
+      "Bash(pkill -f \"aithink.exe\")",
+      "Bash(pkill -f \"main.exe\")",
+      "Bash(pkill -f \"aithink\")",
+      "Bash(git checkout:*)",
+      "Bash(tasklist //FI 'IMAGENAME eq chrome.exe')",
+      "Bash(taskkill //F //IM chrome.exe 2)",
+      "Bash(/dev/null sleep:*)"
     ]
   }
 }

@@ -9,6 +9,9 @@ func SetupRouter() *gin.Engine {
 	// 创建处理器
 	handler := NewHandler()
 
+	// 创建OpenAI兼容网关
+	gateway := NewOpenAIGateway(handler.GetAPIKeyManager(), handler.aiService)
+
 	// API v1 路由组
 	v1 := r.Group("/api/v1")
 	{
@@ -30,6 +33,34 @@ func SetupRouter() *gin.Engine {
 		
 		// 反检测自测接口
 		v1.GET("/anti-detection/check", handler.CheckAntiDetection)
+	}
+
+	// API Key 管理路由（需要认证？不需要，因为是管理接口，创建时才需要session_id验证）
+	apikey := r.Group("/api/v1/apikey")
+	{
+		// API Key 管理接口（不需要认证）
+		apikey.POST("/create", handler.CreateAPIKey)
+		apikey.GET("/list", handler.ListAPIKeys)
+		apikey.POST("/update/:apikey", handler.UpdateAPIKey)
+		apikey.POST("/delete/:apikey", handler.DeleteAPIKey)
+	}
+
+	// API Key 提问路由（需要API Key认证）
+	apikeyAsk := r.Group("/api/v1/apikey")
+	apikeyAsk.Use(APIKeyAuth(handler))
+	{
+		apikeyAsk.POST("/ask", handler.APIKeyAsk)
+		apikeyAsk.POST("/ask/stream", handler.APIKeyAskStream)
+	}
+
+	// OpenAI兼容接口（Claude Code使用）
+	v1OpenAI := r.Group("/v1")
+	{
+		// 聊天补全接口（兼容OpenAI API）
+		v1OpenAI.POST("/chat/completions", gateway.ChatCompletions)
+		
+		// 模型列表接口
+		v1OpenAI.GET("/models", gateway.Models)
 	}
 
 	// 健康检查

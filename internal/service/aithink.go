@@ -114,6 +114,15 @@ func (s *AIService) openLoginPage(sessionID string, platform models.Platform) {
 		} else {
 			log.Printf("[%s] Cookies已加载", sessionID)
 		}
+		
+		// 加载cookies后，先导航到目标网站让cookies生效
+		log.Printf("[%s] 导航到目标网站使cookies生效...", sessionID)
+		client := browser.NewZhipuClient(session)
+		if navErr := client.NavigateToHome(); navErr != nil {
+			log.Printf("[%s] 导航失败: %v", sessionID, navErr)
+		} else {
+			log.Printf("[%s] 导航完成，等待页面加载...", sessionID)
+		}
 	}
 
 	// 检查是否已登录（加载cookie后检查）
