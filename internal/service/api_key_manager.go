@@ -3,24 +3,102 @@ package service
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"aithink/internal/models"
 )
 
-// APIKeyManager API密钥管理器
+// APIKeyManager API密钥管理器（带文件持久化）
 type APIKeyManager struct {
-	mu      sync.RWMutex
-	apiKeys map[string]*models.APIKeyInfo
+	mu         sync.RWMutex
+	apiKeys    map[string]*models.APIKeyInfo
+	storePath  string
 }
 
 // NewAPIKeyManager 创建API密钥管理器
 func NewAPIKeyManager() *APIKeyManager {
-	return &APIKeyManager{
-		apiKeys: make(map[string]*models.APIKeyInfo),
+	storePath := filepath.Join("data", "api_keys.json")
+	
+	m := &APIKeyManager{
+		apiKeys:   make(map[string]*models.APIKeyInfo),
+		storePath: storePath,
 	}
+	
+	// 加载已保存的API密钥
+	if err := m.loadFromDisk(); err != nil {
+		log.Printf("加载API密钥失败: %v", err)
+	}
+	
+	return m
+}
+
+// loadFromDisk 从文件加载API密钥
+func (m *APIKeyManager) loadFromDisk() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	data, err := os.ReadFile(m.storePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// 文件不存在，创建目录
+			if err := os.MkdirAll(filepath.Dir(m.storePath), 0755); err != nil {
+				return fmt.Errorf("创建数据目录失败: %v", err)
+			}
+			return nil
+		}
+		return fmt.Errorf("读取文件失败: %v", err)
+	}
+
+	// 去除UTF-8 BOM
+	if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+		data = data[3:]
+	}
+
+	var keys []*models.APIKeyInfo
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return fmt.Errorf("解析文件失败: %v", err)
+	}
+
+	for _, key := range keys {
+		m.apiKeys[key.APIKey] = key
+	}
+
+	log.Printf("已加载 %d 个API密钥", len(keys))
+	return nil
+}
+
+// saveToDisk 保存API密钥到文件
+func (m *APIKeyManager) saveToDisk() error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	keys := make([]*models.APIKeyInfo, 0, len(m.apiKeys))
+	for _, key := range m.apiKeys {
+		if key.Status != models.APIKeyStatusDeleted {
+			keys = append(keys, key)
+		}
+	}
+
+	data, err := json.MarshalIndent(keys, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化失败: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(m.storePath), 0755); err != nil {
+		return fmt.Errorf("创建目录失败: %v", err)
+	}
+
+	if err := os.WriteFile(m.storePath, data, 0600); err != nil {
+		return fmt.Errorf("写入文件失败: %v", err)
+	}
+
+	return nil
 }
 
 // GenerateAPIKey 生成API密钥
@@ -56,6 +134,11 @@ func (m *APIKeyManager) GenerateAPIKey(req models.CreateAPIKeyRequest) (models.C
 	m.mu.Lock()
 	m.apiKeys[apiKey] = keyInfo
 	m.mu.Unlock()
+
+	// 持久化到文件
+	if err := m.saveToDisk(); err != nil {
+		log.Printf("保存API密钥到文件失败: %v", err)
+	}
 
 	resp := models.CreateAPIKeyResponse{
 		APIKeyInfo: *keyInfo,
@@ -148,6 +231,13 @@ func (m *APIKeyManager) UpdateAPIKey(apiKey string, req models.UpdateAPIKeyReque
 		}
 	}
 
+	// 持久化到文件
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if err := m.saveToDisk(); err != nil {
+		log.Printf("保存API密钥到文件失败: %v", err)
+	}
+
 	return nil
 }
 
@@ -162,22 +252,35 @@ func (m *APIKeyManager) DeleteAPIKey(apiKey string) error {
 	}
 
 	keyInfo.Status = models.APIKeyStatusDeleted
+
+	// 持久化到文件
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if err := m.saveToDisk(); err != nil {
+		log.Printf("保存API密钥到文件失败: %v", err)
+	}
+
 	return nil
 }
 
-// UpdateUsage 更新API密钥使用记录
+// UpdateUsage 更新API密钥使用记录（异步保存）
 func (m *APIKeyManager) UpdateUsage(apiKey string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	keyInfo, exists := m.apiKeys[apiKey]
 	if !exists {
+		m.mu.Unlock()
 		return
 	}
 
 	now := time.Now()
 	keyInfo.RequestCount++
 	keyInfo.LastUsedAt = &now
+
+	m.mu.Unlock()
+
+	// 异步保存到文件
+	go m.saveToDisk()
 }
 
 // updateKeyStatus 更新密钥状态（内部方法，不加锁）

@@ -9,6 +9,8 @@ import (
 
 	"aithink/internal/browser"
 	"aithink/internal/models"
+
+	"github.com/chromedp/chromedp"
 )
 
 // AIService AI服务
@@ -244,17 +246,24 @@ func (s *AIService) GetLoginStatus(sessionID string) (*models.LoginStatusRespons
 
 // Ask 向AI平台提问
 func (s *AIService) Ask(req *models.AskRequest) (*models.AskResponse, error) {
-	// 检查登录状态
+	// 先检查会话状态
 	s.mu.RLock()
 	state := s.loginStates[req.SessionID]
 	s.mu.RUnlock()
 
-	if state == nil {
-		return nil, fmt.Errorf("会话不存在或未登录，请先登录，session_id: %s", req.SessionID)
-	}
-
-	if state.Status != models.LoginStatusSuccess {
-		return nil, fmt.Errorf("会话未登录或登录未完成，当前状态: %v", state.Status)
+	if state == nil || state.Status != models.LoginStatusSuccess {
+		// 会话不存在或未登录，尝试自动创建会话（通过cookie恢复）
+		log.Printf("[%s] 会话不存在或未登录，尝试自动创建会话...", req.SessionID)
+		if err := s.autoCreateSession(req.SessionID, req.Platform); err != nil {
+			return nil, fmt.Errorf("自动创建会话失败: %v", err)
+		}
+		// 再次检查状态
+		s.mu.RLock()
+		state = s.loginStates[req.SessionID]
+		s.mu.RUnlock()
+		if state == nil || state.Status != models.LoginStatusSuccess {
+			return nil, fmt.Errorf("会话创建失败，请手动登录，session_id: %s", req.SessionID)
+		}
 	}
 
 	// 获取浏览器会话
@@ -336,4 +345,80 @@ func (s *AIService) updateLoginState(sessionID string, status models.LoginStatus
 // getCurrentTimestamp 获取当前时间戳（辅助函数）
 func getCurrentTimestamp() int64 {
 	return time.Now().UnixNano() / 1e6 // 毫秒时间戳
+}
+
+// autoCreateSession 自动创建会话（通过cookie恢复）
+func (s *AIService) autoCreateSession(sessionID string, platform models.Platform) error {
+	var userDataDir string
+	switch platform {
+	case models.PlatformZhipu:
+		userDataDir = "sessions/zhipu_data"
+	case models.PlatformChatGPT:
+		userDataDir = "sessions/chatgpt_data"
+	case models.PlatformClaude:
+		userDataDir = "sessions/claude_data"
+	default:
+		userDataDir = "sessions/default"
+	}
+
+	log.Printf("[%s] 自动创建会话，userDataDir: %s", sessionID, userDataDir)
+
+	// 创建浏览器会话
+	if err := s.browserMgr.CreateSession(sessionID, userDataDir); err != nil {
+		return fmt.Errorf("创建会话失败: %v", err)
+	}
+
+	// 初始化登录状态为pending
+	s.mu.Lock()
+	s.loginStates[sessionID] = &LoginState{
+		Status:    models.LoginStatusPending,
+		Message:   "正在通过cookie恢复会话...",
+		UpdatedAt: time.Now(),
+	}
+	s.mu.Unlock()
+
+	// 尝试加载cookie并导航到目标网站
+	platformStr := string(platform)
+	if s.browserMgr.HasValidCookies(platformStr) {
+		log.Printf("[%s] 发现有效cookie，加载...", sessionID)
+		
+		// 获取会话
+		session, err := s.browserMgr.GetSession(sessionID)
+		if err != nil {
+			return err
+		}
+		
+		// 先导航到目标网站，让cookie可以应用
+		client := browser.NewZhipuClient(session)
+		if err := client.NavigateToHome(); err != nil {
+			log.Printf("[%s] 导航失败: %v", sessionID, err)
+		} else {
+			log.Printf("[%s] 导航完成，准备应用cookie...", sessionID)
+		}
+		
+		// 再加载cookie
+		if err := s.browserMgr.LoadCookies(sessionID, platformStr); err != nil {
+			log.Printf("[%s] 加载cookie失败: %v", sessionID, err)
+			return fmt.Errorf("加载cookie失败: %v", err)
+		}
+		
+		// 刷新页面使cookie生效
+		chromedp.Run(session.Ctx, chromedp.Reload())
+		time.Sleep(2 * time.Second)
+		
+		// 检查是否已登录
+		if client.CheckLoggedIn() {
+			log.Printf("[%s] cookie恢复成功", sessionID)
+			s.mu.Lock()
+			s.loginStates[sessionID] = &LoginState{
+				Status:    models.LoginStatusSuccess,
+				Message:   "cookie恢复成功",
+				UpdatedAt: time.Now(),
+			}
+			s.mu.Unlock()
+			return nil
+		}
+	}
+
+	return fmt.Errorf("cookie无效或已过期")
 }

@@ -3,6 +3,7 @@ module aithink
 go 1.21
 
 require (
+	github.com/chromedp/cdproto v0.0.0-20240202021202-6d0b6a386732
 	github.com/chromedp/chromedp v0.9.5
 	github.com/gin-gonic/gin v1.9.1
 )
@@ -10,7 +11,6 @@ require (
 require (
 	github.com/bytedance/sonic v1.9.1 // indirect
 	github.com/chenzhuoyu/base64x v0.0.0-20221115062448-fe3a3abad311 // indirect
-	github.com/chromedp/cdproto v0.0.0-20240202021202-6d0b6a386732 // indirect
 	github.com/chromedp/sysutil v1.0.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.2 // indirect
 	github.com/gin-contrib/sse v0.1.0 // indirect

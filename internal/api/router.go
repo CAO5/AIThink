@@ -1,6 +1,10 @@
 package api
 
-import "github.com/gin-gonic/gin"
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
 
 // SetupRouter 设置路由
 func SetupRouter() *gin.Engine {
@@ -11,6 +15,9 @@ func SetupRouter() *gin.Engine {
 
 	// 创建OpenAI兼容网关
 	gateway := NewOpenAIGateway(handler.GetAPIKeyManager(), handler.aiService)
+
+	// 创建Anthropic兼容网关
+	anthropicGateway := NewAnthropicGateway(handler.GetAPIKeyManager(), handler.aiService)
 
 	// API v1 路由组
 	v1 := r.Group("/api/v1")
@@ -62,6 +69,32 @@ func SetupRouter() *gin.Engine {
 		// 模型列表接口
 		v1OpenAI.GET("/models", gateway.Models)
 	}
+
+	// Anthropic兼容接口（Claude Code原生API格式）
+	v1Anthropic := r.Group("/v1")
+	{
+		// 消息接口（兼容Anthropic API）
+		v1Anthropic.POST("/messages", anthropicGateway.Messages)
+	}
+
+	// 首页
+	r.GET("/", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"service": "AIThink - AI工具API服务",
+			"version": "v1.0.0",
+			"endpoints": gin.H{
+				"health":               "GET /health",
+				"login":                "POST /api/v1/login",
+				"login_status":         "GET /api/v1/login/status",
+				"ask":                  "POST /api/v1/ask",
+				"apikey_create":        "POST /api/v1/apikey/create",
+				"apikey_list":          "GET /api/v1/apikey/list",
+				"apikey_ask":           "POST /api/v1/apikey/ask",
+				"openai_chat":          "POST /v1/chat/completions",
+				"anthropic_messages":   "POST /v1/messages",
+			},
+		})
+	})
 
 	// 健康检查
 	r.GET("/health", handler.HealthCheck)

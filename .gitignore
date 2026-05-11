@@ -26,10 +26,12 @@ sessions/
 cookies/
 test_user_data/
 user_data_dir/
-sessions/
 
 # 截图目录
 screenshots/
+
+# 数据文件（含API Key持久化）
+data/
 
 # IDE 配置
 .vscode/

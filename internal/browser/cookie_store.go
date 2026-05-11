@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 )
 
@@ -170,7 +171,7 @@ func (cs *CookieStore) LoadCookies(platform string) ([]*Cookie, error) {
 	return cookies, nil
 }
 
-// ApplyCookies 将cookie应用到浏览器上下文（在页面导航后调用）
+// ApplyCookies 将cookie应用到浏览器上下文（使用CDP原生API设置）
 func (cs *CookieStore) ApplyCookies(ctx interface{}, platform string) error {
 	cookies, err := cs.LoadCookies(platform)
 	if err != nil {
@@ -182,53 +183,64 @@ func (cs *CookieStore) ApplyCookies(ctx interface{}, platform string) error {
 		return nil
 	}
 
-	// 构建JavaScript代码来设置cookie
-	jsCode := ""
+	// 使用 CDP 原生API设置cookies，支持httpOnly
+	c := ctx.(context.Context)
 	for _, cookie := range cookies {
 		if cookie.Name == "raw_cookies" {
-			// 直接设置raw cookie - 需要解析并逐个设置
+			// 解析 raw cookie 字符串并逐个设置
 			rawCookies := cookie.Value
-			// 将raw cookie字符串分割成单个cookie
 			cookiePairs := strings.Split(rawCookies, "; ")
 			for _, pair := range cookiePairs {
-				if pair != "" {
-					jsCode += fmt.Sprintf(`document.cookie = "%s; domain=%s; path=/"; `, pair, cookie.Domain)
+				if pair == "" {
+					continue
+				}
+				parts := strings.SplitN(pair, "=", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				cName := strings.TrimSpace(parts[0])
+				cValue := strings.TrimSpace(parts[1])
+				
+				setCookieAction := network.SetCookie(cName, cValue).
+					WithDomain(cookie.Domain).
+					WithPath("/").
+					WithHTTPOnly(false)
+				err := chromedp.Run(c, setCookieAction)
+				if err != nil {
+					log.Printf("设置cookie %s 失败: %v", cName, err)
 				}
 			}
-		} else {
-			// 构建单个cookie字符串
-			cookieStr := fmt.Sprintf("%s=%s", cookie.Name, cookie.Value)
-			if cookie.Domain != "" {
-				cookieStr += fmt.Sprintf("; domain=%s", cookie.Domain)
-			}
-			if cookie.Path != "" {
-				cookieStr += fmt.Sprintf("; path=%s", cookie.Path)
-			}
-			if cookie.Expires.After(time.Now()) {
-				cookieStr += fmt.Sprintf("; expires=%s", cookie.Expires.UTC().Format(time.RFC1123))
-			}
-			if cookie.Secure {
-				cookieStr += "; secure"
-			}
-			if cookie.HTTPOnly {
-				cookieStr += "; httponly"
-			}
-			jsCode += fmt.Sprintf(`document.cookie = "%s"; `, cookieStr)
+			continue
 		}
-	}
-
-	if jsCode != "" {
-		// 先等待页面加载完成
-		err := chromedp.Run(ctx.(context.Context),
-			chromedp.Sleep(2*time.Second), // 等待页面加载
-			chromedp.Evaluate(jsCode, nil),
-		)
+		
+		// 使用CDP原生API设置cookie
+		setCookieAction := network.SetCookie(cookie.Name, cookie.Value).
+			WithDomain(cookie.Domain).
+			WithPath(cookie.Path).
+			WithSecure(cookie.Secure).
+			WithHTTPOnly(cookie.HTTPOnly)
+		
+		sameSite := network.CookieSameSiteNone
+		switch strings.ToLower(cookie.SameSite) {
+		case "strict":
+			sameSite = network.CookieSameSiteStrict
+		case "lax":
+			sameSite = network.CookieSameSiteLax
+		case "none":
+			sameSite = network.CookieSameSiteNone
+		default:
+			sameSite = network.CookieSameSiteNone
+		}
+		
+		setCookieAction = setCookieAction.WithSameSite(sameSite)
+		
+		err := chromedp.Run(c, setCookieAction)
 		if err != nil {
-			return fmt.Errorf("应用cookies失败: %v", err)
+			log.Printf("设置cookie %s 失败: %v", cookie.Name, err)
 		}
-		log.Printf("已应用 %d 个cookies到浏览器", len(cookies))
 	}
 
+	log.Printf("已尝试应用 %d 个cookies", len(cookies))
 	return nil
 }
 
