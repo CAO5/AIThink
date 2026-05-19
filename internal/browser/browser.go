@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +37,38 @@ func findChromePath() string {
 	return ""
 }
 
+// killChromeByUserDataDir 杀掉使用指定用户数据目录的Chrome进程
+// 只杀掉AIThink相关的Chrome进程，不影响用户正常使用的Chrome
+func killChromeByUserDataDir(userDataDir string) {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	
+	absDir, err := filepath.Abs(userDataDir)
+	if err != nil {
+		absDir = userDataDir
+	}
+	
+	log.Printf("查找使用用户数据目录的Chrome进程: %s", absDir)
+	
+	cmd := exec.Command("powershell", "-Command",
+		fmt.Sprintf(`Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object { $_.CommandLine -like '*%s*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force; Write-Host $_.ProcessId }`, absDir))
+	
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("查找Chrome进程失败: %v", err)
+		return
+	}
+	
+	pids := strings.TrimSpace(string(output))
+	if pids != "" {
+		log.Printf("已终止使用目录 %s 的Chrome进程: %s", absDir, pids)
+		time.Sleep(2 * time.Second)
+	} else {
+		log.Printf("没有找到使用目录 %s 的Chrome进程", absDir)
+	}
+}
+
 type BrowserManager struct {
 	browsers       map[string]*BrowserSession
 	mu             sync.RWMutex
@@ -46,6 +81,7 @@ type BrowserSession struct {
 	Ctx        context.Context
 	Cancel     context.CancelFunc
 	SessionID  string
+	Platform   string    // 平台类型（如 zhipu、chatgpt、claude 等）
 	CreatedAt  time.Time
 	LastActive time.Time
 }
@@ -75,12 +111,41 @@ func (bm *BrowserManager) SetSessionTimeout(timeout time.Duration) {
 	bm.sessionTimeout = timeout
 }
 
-func (bm *BrowserManager) CreateSession(sessionID string, userDataDir string) error {
+func (bm *BrowserManager) CreateSession(sessionID string, userDataDir string, platform string) error {
 	bm.mu.Lock()
-	defer bm.mu.Unlock()
+	// 检查会话是否已存在，如果存在则复用
+	if existing, exists := bm.browsers[sessionID]; exists {
+		bm.mu.Unlock()
+		log.Printf("会话已存在: %s，复用现有会话", sessionID)
+		existing.LastActive = time.Now()
+		return nil
+	}
+	bm.mu.Unlock()
 
-	if _, exists := bm.browsers[sessionID]; exists {
-		return fmt.Errorf("会话已存在: %s", sessionID)
+	// 如果有userDataDir，清理可能存在的lock文件，并终止占用该目录的Chrome进程
+	if userDataDir != "" {
+		if !filepath.IsAbs(userDataDir) {
+			if absPath, err := filepath.Abs(userDataDir); err == nil {
+				userDataDir = absPath
+			}
+		}
+		os.MkdirAll(userDataDir, 0755)
+		
+		// 先杀掉使用此用户数据目录的旧Chrome进程（只杀AIThink相关的，不影响用户正常Chrome）
+		killChromeByUserDataDir(userDataDir)
+		
+		// 清理Chrome的singleton lock文件
+		lockFiles := []string{
+			filepath.Join(userDataDir, "SingletonLock"),
+			filepath.Join(userDataDir, "SingletonSocket"),
+			filepath.Join(userDataDir, "SingletonCookie"),
+		}
+		for _, lockFile := range lockFiles {
+			if err := os.Remove(lockFile); err == nil {
+				log.Printf("已清理lock文件: %s", lockFile)
+			}
+		}
+		log.Printf("使用用户数据目录(绝对路径): %s", userDataDir)
 	}
 
 	log.Println("正在启动浏览器...")
@@ -104,14 +169,7 @@ func (bm *BrowserManager) CreateSession(sessionID string, userDataDir string) er
 	}
 
 	if userDataDir != "" {
-		if !filepath.IsAbs(userDataDir) {
-			if absPath, err := filepath.Abs(userDataDir); err == nil {
-				userDataDir = absPath
-			}
-		}
-		os.MkdirAll(userDataDir, 0755)
 		opts = append(opts, chromedp.UserDataDir(userDataDir))
-		log.Printf("使用用户数据目录(绝对路径): %s", userDataDir)
 	}
 
 	chromePath := findChromePath()
@@ -120,12 +178,24 @@ func (bm *BrowserManager) CreateSession(sessionID string, userDataDir string) er
 		log.Printf("使用Chrome路径: %s", chromePath)
 	}
 
-	allocCtx, _ := chromedp.NewExecAllocator(context.Background(), opts...)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
 	ctx, cancel := chromedp.NewContext(allocCtx)
 	log.Println("浏览器上下文已创建")
 
+	// 测试Chrome是否成功启动
+	log.Println("测试Chrome连接...")
+	err := chromedp.Run(ctx, chromedp.Evaluate(`window.location.href`, nil))
+	if err != nil {
+		log.Printf("Chrome启动失败: %v", err)
+		// 清理已分配的上下文
+		cancel()
+		cancelAlloc()
+		return fmt.Errorf("chrome启动失败: %v", err)
+	}
+	log.Println("Chrome连接测试成功")
+
 	log.Println("注入反检测脚本...")
-	err := chromedp.Run(ctx,
+	err = chromedp.Run(ctx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			return chromedp.Evaluate(`
 				(function() {
@@ -211,16 +281,36 @@ func (bm *BrowserManager) CreateSession(sessionID string, userDataDir string) er
 	}
 
 	now := time.Now()
+	bm.mu.Lock()
 	bm.browsers[sessionID] = &BrowserSession{
 		Ctx:        ctx,
 		Cancel:     cancel,
 		SessionID:  sessionID,
+		Platform:   platform,
 		CreatedAt:  now,
 		LastActive: now,
 	}
+	bm.mu.Unlock()
 
 	log.Printf("创建浏览器会话: %s", sessionID)
 	return nil
+}
+
+func (bm *BrowserManager) SetCookieStore(store *CookieStore) {
+	bm.cookieStore = store
+}
+
+func (bm *BrowserManager) GetContext(sessionID string) context.Context {
+	bm.mu.RLock()
+	defer bm.mu.RUnlock()
+	
+	session, exists := bm.browsers[sessionID]
+	if !exists {
+		return nil
+	}
+	
+	session.LastActive = time.Now()
+	return session.Ctx
 }
 
 func (bm *BrowserManager) GetSession(sessionID string) (*BrowserSession, error) {
@@ -242,18 +332,16 @@ func (bm *BrowserManager) CloseSession(sessionID string) error {
 
 	session, exists := bm.browsers[sessionID]
 	if !exists {
-		return fmt.Errorf("会话不存在: %s", sessionID)
+		log.Printf("会话不存在，无需关闭: %s", sessionID)
+		return nil
 	}
 
 	// 保存cookies再关闭
 	if bm.cookieStore != nil {
-		platform := "unknown"
-		if sessionID[:5] == "zhipu" {
-			platform = "zhipu"
-		} else if sessionID[:7] == "chatgpt" {
-			platform = "chatgpt"
-		} else if sessionID[:6] == "claude" {
-			platform = "claude"
+		// 使用会话中存储的平台类型，替代旧的字符串前缀判断方式
+		platform := session.Platform
+		if platform == "" {
+			platform = "unknown"
 		}
 		if err := bm.cookieStore.SaveCookies(session.Ctx, platform); err != nil {
 			log.Printf("保存cookies失败: %v", err)
@@ -261,7 +349,10 @@ func (bm *BrowserManager) CloseSession(sessionID string) error {
 	}
 
 	log.Printf("正在关闭浏览器会话: %s", sessionID)
-	session.Cancel()
+	// 安全地调用Cancel，防止重复关闭channel
+	if session.Cancel != nil {
+		session.Cancel()
+	}
 	delete(bm.browsers, sessionID)
 	log.Printf("浏览器会话已关闭: %s", sessionID)
 	return nil
@@ -282,7 +373,9 @@ func (bm *BrowserManager) cleanupExpiredSessions() {
 	for id, session := range bm.browsers {
 		if now.Sub(session.LastActive) > bm.sessionTimeout {
 			log.Printf("清理过期会话: %s (最后活跃: %v)", id, session.LastActive)
-			session.Cancel()
+			if session.Cancel != nil {
+				session.Cancel()
+			}
 			delete(bm.browsers, id)
 		}
 	}

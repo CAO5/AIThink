@@ -4,9 +4,20 @@ package models
 type Platform string
 
 const (
-	PlatformZhipu   Platform = "zhipu"   // 智谱清言
-	PlatformChatGPT Platform = "chatgpt" // ChatGPT
-	PlatformClaude  Platform = "claude"  // Claude
+	PlatformZhipu    Platform = "zhipu"    // 智谱清言
+	PlatformChatGPT  Platform = "chatgpt"  // ChatGPT
+	PlatformClaude   Platform = "claude"   // Claude
+	PlatformDoubao   Platform = "doubao"   // 豆包
+	PlatformQwen     Platform = "qwen"     // 千问（通义千问）
+	PlatformDeepSeek Platform = "deepseek" // DeepSeek
+)
+
+// 对话模式类型枚举
+type ConversationMode string
+
+const (
+	ConversationModeNew      ConversationMode = "new"      // 新建对话
+	ConversationModeExisting ConversationMode = "existing"  // 在已有对话中继续
 )
 
 // 登录状态
@@ -43,9 +54,10 @@ type LoginStatusResponse struct {
 
 // 提问请求
 type AskRequest struct {
-	Platform  Platform `json:"platform"`
-	SessionID string   `json:"session_id"` // 会话ID
-	Question  string   `json:"question"`
+	Platform         Platform         `json:"platform"`
+	SessionID        string           `json:"session_id"`                  // 会话ID
+	Question         string           `json:"question"`
+	ConversationMode ConversationMode `json:"conversation_mode,omitempty"` // 对话模式
 }
 
 // API响应
@@ -65,6 +77,7 @@ type LoginResponse struct {
 // 提问响应
 type AskResponse struct {
 	Answer     string `json:"answer"`
+	Thinking   string `json:"thinking,omitempty"`   // 思考过程（Extended Thinking）
 	SessionID  string `json:"session_id"`
 	IsBot      bool   `json:"is_bot,omitempty"`      // 是否被检测为机器人
 	DetectInfo string `json:"detect_info,omitempty"` // 检测信息
@@ -144,4 +157,16 @@ type TencentResponse struct {
 type CustomResponse struct {
 	URL    string `json:"url"`
 	HasKey bool   `json:"has_key"`
+}
+
+// ==================== 平台选择器配置相关类型 ====================
+
+// PlatformSelectorConfig 平台页面元素选择器配置
+type PlatformSelectorConfig struct {
+	InputBox       string `json:"input_box"`        // 输入框选择器
+	SendButton     string `json:"send_button"`      // 发送按钮选择器
+	ResponseArea   string `json:"response_area"`    // 回复区域选择器
+	NewChatButton  string `json:"new_chat_button"`  // 新建对话按钮选择器
+	StopButton     string `json:"stop_button"`      // 停止生成按钮选择器
+	LoginIndicator string `json:"login_indicator"`  // 登录状态指示器选择器
 }

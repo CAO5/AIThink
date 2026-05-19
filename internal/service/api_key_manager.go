@@ -73,11 +73,8 @@ func (m *APIKeyManager) loadFromDisk() error {
 	return nil
 }
 
-// saveToDisk 保存API密钥到文件
-func (m *APIKeyManager) saveToDisk() error {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
+// saveToDiskLocked 保存API密钥到文件（调用方必须持有锁）
+func (m *APIKeyManager) saveToDiskLocked() error {
 	keys := make([]*models.APIKeyInfo, 0, len(m.apiKeys))
 	for _, key := range m.apiKeys {
 		if key.Status != models.APIKeyStatusDeleted {
@@ -99,6 +96,13 @@ func (m *APIKeyManager) saveToDisk() error {
 	}
 
 	return nil
+}
+
+// saveToDisk 保存API密钥到文件（自动获取读锁）
+func (m *APIKeyManager) saveToDisk() error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.saveToDiskLocked()
 }
 
 // GenerateAPIKey 生成API密钥
@@ -135,7 +139,7 @@ func (m *APIKeyManager) GenerateAPIKey(req models.CreateAPIKeyRequest) (models.C
 	m.apiKeys[apiKey] = keyInfo
 	m.mu.Unlock()
 
-	// 持久化到文件
+	// 持久化到文件（调用方已释放写锁）
 	if err := m.saveToDisk(); err != nil {
 		log.Printf("保存API密钥到文件失败: %v", err)
 	}
@@ -211,10 +215,10 @@ func (m *APIKeyManager) ListAPIKeys() models.APIKeyListResponse {
 // UpdateAPIKey 更新API密钥信息
 func (m *APIKeyManager) UpdateAPIKey(apiKey string, req models.UpdateAPIKeyRequest) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	keyInfo, exists := m.apiKeys[apiKey]
 	if !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("无效的API密钥")
 	}
 
@@ -227,39 +231,38 @@ func (m *APIKeyManager) UpdateAPIKey(apiKey string, req models.UpdateAPIKeyReque
 		case models.APIKeyStatusActive, models.APIKeyStatusInactive:
 			keyInfo.Status = *req.Status
 		default:
+			m.mu.Unlock()
 			return fmt.Errorf("不支持的状态: %s", *req.Status)
 		}
 	}
 
-	// 持久化到文件
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if err := m.saveToDisk(); err != nil {
+	// 持久化到文件（在持有写锁的情况下直接保存）
+	if err := m.saveToDiskLocked(); err != nil {
 		log.Printf("保存API密钥到文件失败: %v", err)
 	}
 
+	m.mu.Unlock()
 	return nil
 }
 
 // DeleteAPIKey 删除API密钥
 func (m *APIKeyManager) DeleteAPIKey(apiKey string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	keyInfo, exists := m.apiKeys[apiKey]
 	if !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("无效的API密钥")
 	}
 
 	keyInfo.Status = models.APIKeyStatusDeleted
 
-	// 持久化到文件
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if err := m.saveToDisk(); err != nil {
+	// 持久化到文件（在持有写锁的情况下直接保存）
+	if err := m.saveToDiskLocked(); err != nil {
 		log.Printf("保存API密钥到文件失败: %v", err)
 	}
 
+	m.mu.Unlock()
 	return nil
 }
 

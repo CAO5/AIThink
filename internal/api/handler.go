@@ -1,11 +1,14 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"strings"
 
 	"aithink/internal/config"
+	"aithink/internal/memory"
 	"aithink/internal/models"
+	"aithink/internal/platform"
 	"aithink/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -616,6 +619,23 @@ func (h *Handler) APIKeyAsk(c *gin.Context) {
 		return
 	}
 
+	// 调试：打印接收到的 question 信息
+	log.Printf("[API] 接收到question长度: %d", len(req.Question))
+	qLen := len(req.Question)
+	if qLen > 10 {
+		qLen = 10
+	}
+	log.Printf("[API] question前10个字符: %s", req.Question[:qLen])
+	// 打印每个字符的 rune 值
+	count := 0
+	for _, r := range req.Question {
+		if count >= 5 {
+			break
+		}
+		log.Printf("[API] 字符[%d]: rune=U+%04X, char=%c", count, r, r)
+		count++
+	}
+
 	if req.Question == "" {
 		c.JSON(http.StatusBadRequest, models.APIResponse{
 			Code:    400,
@@ -662,5 +682,126 @@ func (h *Handler) APIKeyAsk(c *gin.Context) {
 func (h *Handler) APIKeyAskStream(c *gin.Context) {
 	// 使用与普通API Key提问相同的逻辑
 	h.APIKeyAsk(c)
+}
+
+// ==================== 记忆管理接口 ====================
+
+// GetMemoryStatus 查看记忆状态
+// @Summary 查看记忆状态
+// @Description 查看指定API Key的对话记忆状态
+// @Produce json
+// @Param api_key path string true "API Key"
+// @Success 200 {object} models.APIResponse
+// @Router /api/v1/memory/{api_key} [get]
+func (h *Handler) GetMemoryStatus(c *gin.Context) {
+	apiKey := c.Param("api_key")
+	if apiKey == "" {
+		c.JSON(http.StatusBadRequest, models.APIResponse{Code: 400, Message: "api_key不能为空"})
+		return
+	}
+
+	state := memory.GetGlobalMemoryManager().GetConversationState(apiKey)
+	if state == nil {
+		c.JSON(http.StatusOK, models.APIResponse{Code: 0, Message: "查询成功，无记忆数据", Data: nil})
+		return
+	}
+	c.JSON(http.StatusOK, models.APIResponse{Code: 0, Message: "查询成功", Data: state})
+}
+
+// ClearMemory 清除记忆
+// @Summary 清除记忆
+// @Description 清除指定API Key的所有记忆数据
+// @Produce json
+// @Param api_key path string true "API Key"
+// @Success 200 {object} models.APIResponse
+// @Router /api/v1/memory/{api_key} [delete]
+func (h *Handler) ClearMemory(c *gin.Context) {
+	apiKey := c.Param("api_key")
+	if apiKey == "" {
+		c.JSON(http.StatusBadRequest, models.APIResponse{Code: 400, Message: "api_key不能为空"})
+		return
+	}
+
+	memory.GetGlobalMemoryManager().ClearMemory(apiKey)
+	c.JSON(http.StatusOK, models.APIResponse{Code: 0, Message: "记忆已清除"})
+}
+
+// ==================== 对话管理接口 ====================
+
+// GetConversationStatus 查看对话状态
+// @Summary 查看对话状态
+// @Description 查看指定API Key的对话生命周期状态（包含记忆、会话ID等）
+// @Produce json
+// @Param api_key path string true "API Key"
+// @Success 200 {object} models.APIResponse
+// @Router /api/v1/conversation/{api_key} [get]
+func (h *Handler) GetConversationStatus(c *gin.Context) {
+	apiKey := c.Param("api_key")
+	if apiKey == "" {
+		c.JSON(http.StatusBadRequest, models.APIResponse{Code: 400, Message: "api_key不能为空"})
+		return
+	}
+
+	convManager := memory.NewConversationManager(memory.GetGlobalMemoryManager())
+	info := convManager.GetConversationInfo(apiKey)
+	if info == nil {
+		c.JSON(http.StatusOK, models.APIResponse{Code: 0, Message: "查询成功，无对话数据", Data: nil})
+		return
+	}
+	c.JSON(http.StatusOK, models.APIResponse{Code: 0, Message: "查询成功", Data: info})
+}
+
+// ResetConversation 重置对话
+// @Summary 重置对话
+// @Description 重置指定API Key的对话状态，下次请求时会自动重建
+// @Produce json
+// @Param api_key path string true "API Key"
+// @Success 200 {object} models.APIResponse
+// @Router /api/v1/conversation/{api_key}/reset [post]
+func (h *Handler) ResetConversation(c *gin.Context) {
+	apiKey := c.Param("api_key")
+	if apiKey == "" {
+		c.JSON(http.StatusBadRequest, models.APIResponse{Code: 400, Message: "api_key不能为空"})
+		return
+	}
+
+	convManager := memory.NewConversationManager(memory.GetGlobalMemoryManager())
+	convManager.ResetConversation(apiKey)
+	c.JSON(http.StatusOK, models.APIResponse{Code: 0, Message: "对话已重置"})
+}
+
+// ==================== 平台管理接口 ====================
+
+// ListPlatforms 列出所有已注册平台
+// @Summary 列出已注册平台
+// @Description 获取所有已注册的AI平台列表
+// @Produce json
+// @Success 200 {object} models.APIResponse
+// @Router /api/v1/platforms [get]
+func (h *Handler) ListPlatforms(c *gin.Context) {
+	platforms := platform.GetRegistry().ListPlatforms()
+	c.JSON(http.StatusOK, models.APIResponse{Code: 0, Message: "查询成功", Data: platforms})
+}
+
+// GetPlatformConfig 获取平台配置
+// @Summary 获取平台配置
+// @Description 获取指定平台的详细配置信息
+// @Produce json
+// @Param name path string true "平台名称"
+// @Success 200 {object} models.APIResponse
+// @Router /api/v1/platforms/{name}/config [get]
+func (h *Handler) GetPlatformConfig(c *gin.Context) {
+	platformName := c.Param("name")
+	if platformName == "" {
+		c.JSON(http.StatusBadRequest, models.APIResponse{Code: 400, Message: "平台名称不能为空"})
+		return
+	}
+
+	config, err := platform.GetRegistry().GetConfig(models.Platform(platformName))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.APIResponse{Code: 400, Message: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, models.APIResponse{Code: 0, Message: "查询成功", Data: config})
 }
 

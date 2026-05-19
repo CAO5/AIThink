@@ -44,49 +44,62 @@ func (cs *CookieStore) getCookieFilePath(platform string) string {
 }
 
 // SaveCookies 保存cookies到文件
+// 使用CDP原生network.GetCookies API获取cookies，避免JavaScript解析导致的unmarshal错误
 func (cs *CookieStore) SaveCookies(ctx interface{}, platform string) error {
-	// 使用chromedp获取所有cookie
+	c := ctx.(context.Context)
+
 	var cookies []*Cookie
-	err := chromedp.Run(ctx.(context.Context),
+	err := chromedp.Run(c,
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			// 获取所有cookie
-			var networkCookies []struct {
-				Name     string  `json:"name"`
-				Value    string  `json:"value"`
-				Domain   string  `json:"domain"`
-				Path     string  `json:"path"`
-				Expires  float64 `json:"expires"`
-				Secure   bool    `json:"secure"`
-				HTTPOnly bool    `json:"httpOnly"`
-				SameSite string  `json:"sameSite"`
+			// 使用CDP原生API获取cookies，避免JavaScript evaluate导致的parse error
+			networkCookies, err := network.GetCookies().Do(ctx)
+			if err != nil {
+				// 检查是否是unmarshal解析错误（cookie值包含特殊字符导致）
+				if strings.Contains(err.Error(), "could not unmarshal event") ||
+					strings.Contains(err.Error(), "parse error") {
+					log.Printf("Cookie解析错误（特殊字符导致），降级到document.cookie方案")
+					return fmt.Errorf("cookie解析错误: %v", err)
+				}
+				log.Printf("CDP获取cookies失败: %v，回退到document.cookie方案", err)
+				return err
 			}
 
-			// 使用CDP命令获取cookie
-			return chromedp.Evaluate(`
-				(async () => {
-					// 尝试使用CDP的Network.getCookies
-					if (typeof chrome !== 'undefined' && chrome.cookies) {
-						const cookies = await chrome.cookies.getAll({});
-						return cookies;
-					}
-					// 备用方案：从document.cookie解析
-					return document.cookie.split(';').map(c => {
-						const parts = c.trim().split('=');
-						return {
-							name: parts[0],
-							value: parts.slice(1).join('='),
-							domain: location.hostname,
-							path: '/'
-						};
-					});
-				})()
-			`, &networkCookies).Do(ctx)
+			for _, nc := range networkCookies {
+				// 清洗cookie值，过滤可能导致JSON解析失败的控制字符
+				cleanValue := sanitizeCookieValue(nc.Value)
+				
+				cookie := &Cookie{
+					Name:     nc.Name,
+					Value:    cleanValue,
+					Domain:   nc.Domain,
+					Path:     nc.Path,
+					Expires:  time.Unix(0, int64(nc.Expires)*int64(time.Second)),
+					Secure:   nc.Secure,
+					HTTPOnly: nc.HTTPOnly,
+				}
+				switch nc.SameSite {
+				case network.CookieSameSiteStrict:
+					cookie.SameSite = "strict"
+				case network.CookieSameSiteLax:
+					cookie.SameSite = "lax"
+				case network.CookieSameSiteNone:
+					cookie.SameSite = "none"
+				default:
+					cookie.SameSite = "none"
+				}
+				cookies = append(cookies, cookie)
+			}
+			return nil
 		}),
 	)
 
 	if err != nil {
-		log.Printf("获取cookies失败: %v", err)
-		// 尝试备用方案：直接获取document.cookie
+		log.Printf("CDP方式获取cookies失败: %v，使用备用方案", err)
+		return cs.saveCookiesFromDocument(ctx, platform)
+	}
+
+	if len(cookies) == 0 {
+		log.Println("未获取到任何cookies，尝试备用方案")
 		return cs.saveCookiesFromDocument(ctx, platform)
 	}
 
@@ -102,7 +115,7 @@ func (cs *CookieStore) SaveCookies(ctx interface{}, platform string) error {
 		return fmt.Errorf("保存cookies文件失败: %v", err)
 	}
 
-	log.Printf("Cookies已保存到: %s", filePath)
+	log.Printf("Cookies已保存到: %s（共%d个）", filePath, len(cookies))
 	return nil
 }
 
